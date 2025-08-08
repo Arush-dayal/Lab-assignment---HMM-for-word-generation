@@ -1,0 +1,100 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/wiremock/wiremock-testcontainers-go" // Corrected import
+	"golang.org/x/oauth2"
+)
+
+// The original global config variable. We will re-initialize it inside the test.
+var (
+	googleOauthConfig *oauth2.Config
+)
+
+// The original state string.
+var (
+	oauthStateString = "pseudo-random"
+)
+
+// The original getUserInfo function, with minimal changes.
+// We've updated the deprecated `oauth2.NoContext` and `ioutil.ReadAll`.
+func getUserInfo(state string, code string) ([]byte, error) {
+	if state != oauthStateString {
+		return nil, fmt.Errorf("invalid oauth state")
+	}
+
+	// Use context.Background() instead of the deprecated oauth2.NoContext
+	token, err := googleOauthConfig.Exchange(context.Background(), code)
+	if err != nil {
+		return nil, fmt.Errorf("code exchange failed: %s", err.Error())
+	}
+
+	// Create a client that uses the token
+	client := googleOauthConfig.Client(context.Background(), token)
+
+	// The user info URL now points to our WireMock server
+	// We construct the full URL from the base endpoint URL.
+	userInfoURL := googleOauthConfig.Endpoint.AuthURL + "/oauth2/v2/userinfo"
+	response, err := client.Get(userInfoURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed getting user info: %s", err.Error())
+	}
+	defer response.Body.Close()
+
+	// Use io.ReadAll instead of the deprecated ioutil.ReadAll
+	contents, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading response body: %s", err.Error())
+	}
+	return contents, nil
+}
+
+// TestWithWiremock wraps the original logic in an integration test.
+func TestWithWiremock(t *testing.T) {
+	ctx := context.Background()
+
+	// Start the WireMock container, loading the mapping from the external file.
+	container, err := wiremock.RunContainer(ctx,
+		testcontainers.WithImage("wiremock/wiremock:latest"),
+		// This line is the only change needed to load from a file.
+		wiremock.WithMappingFile("google-oauth-flow", "testdata/google-oauth-mapping.json"),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, container.Terminate(ctx))
+	})
+
+	// Get the dynamic URL of the container
+	wiremockURL, err := container.GetURL(ctx)
+	require.NoError(t, err)
+
+	// Re-initialize the global config to point to our WireMock container
+	googleOauthConfig = &oauth2.Config{
+		RedirectURL:  "http://localhost:8080/callback",
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		Scopes:       []string{"https://www.googleapis.com/auth/userinfo.email"},
+		Endpoint: oauth2.Endpoint{
+			// Point all endpoints to our mock server
+			AuthURL:  wiremockURL,
+			TokenURL: wiremockURL + "/token",
+		},
+	}
+
+	// Now, call your original function with mock data.
+	// We simulate having received the state and a code from the redirect.
+	content, err := getUserInfo("pseudo-random", "mock-code-from-google")
+
+	// Assert that the flow worked correctly
+	require.NoError(t, err)
+	require.Contains(t, string(content), "test.user@example.com")
+
+	t.Logf("Successfully got user info from mock server: %s", string(content))
+}
