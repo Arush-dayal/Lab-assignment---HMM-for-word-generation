@@ -1,0 +1,59 @@
+{
+  "mappings": [
+    {
+      "priority": 1,
+      "name": "OAuth2 Authorization Redirect",
+      "request": {
+        "method": "GET",
+        "urlPath": "/auth"
+      },
+      "response": {
+        "status": 302,
+        "headers": {
+          "Location": "{{request.query.redirect_uri}}?code=mock-auth-code-12345&state={{request.query.state}}"
+        },
+        "transformers": ["response-template"]
+      }
+    },
+    {
+      "priority": 2,
+      "name": "OAuth2 Token Exchange",
+      "request": {
+        "method": "POST",
+        "urlPath": "/token",
+        "bodyPatterns": [
+          { "contains": "grant_type=authorization_code" },
+          { "contains": "code=mock-auth-code-12345" }
+        ]
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": {
+          "access_token": "mock-access-token-from-code",
+          "token_type": "Bearer",
+          "expires_in": 3600
+        }
+      }
+    },
+    {
+      "priority": 5,
+      "name": "Protected Hello World Endpoint",
+      "request": {
+        "method": "GET",
+        "url": "/hello",
+        "headers": {
+          "Authorization": {
+            "equalTo": "Bearer mock-access-token-from-code"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": "Hello, world!"
+      }
+    }
+  ]
+}
